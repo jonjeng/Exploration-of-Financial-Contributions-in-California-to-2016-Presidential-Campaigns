@@ -15,3 +15,4 @@ This repository contains an exploration of financial contributions in California
 Included in this repository are:
 * pcampaigns2016.rmd - details of the exploration itself
 * pcampaigns2016.html - knitted from the rmd file contents
+* resources.txt - resources consulted for conducting the exploration
