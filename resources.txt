@@ -1,0 +1,3 @@
+http://eriqande.github.io/rep-res-web/lectures/making-maps-with-R.html
+https://www.r-bloggers.com/mapping-the-march-2014-california-earthquake-with-ggmap/
+http://bcb.dfci.harvard.edu/~aedin/courses/R/CDC/maps.html

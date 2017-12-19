@@ -1,0 +1,936 @@
+---
+title: "Exploration of Financial Contributions in California to 2016 Presidential Campaigns"
+author: Jonathan Jeng
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '~/Documents/DAND/P4/')
+```
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+# Introduction
+
+The 2016 Presidential Race was an attention-grabbing event. It seems we can glean some interesting information by analyzing data regarding financial contributions to relevant campaigns. California is a prominent state so it may be fruitful to regard contributions associated with the state's population. Granted, the data may not be representative, as California is widely viewed as a strongly "blue" state
+
+We'll start by loading the required packages and reading in the data. For this task, we'll use read_csv from the library readr for purposes of convenience. We'll also read in the data for financial contributions in all of the United States to 2016 presidential campaigns to serve as a reference point.
+
+```{r, message = FALSE, warning = FALSE}
+require(dplyr)
+require(reshape2)
+require(ggplot2)
+require(lubridate)
+require(zoo)
+require(ggmap)
+require(stringi)
+require(zipcode)
+require(RColorBrewer)
+
+setwd('~/Documents/DAND/P4/')
+require(readr)
+contribs <- read_csv('P00000001-CA.csv')
+all.contribs <- read_csv('all.csv')
+```
+
+## Superficial Data Description
+
+```{r}
+summary(all.contribs)
+```
+
+
+The following are our columns, according to the provider of this data. The datasets used are from the same provider and have the same structure. We'll also add to these descriptions what we found in the above using the `summary()` function:
+
+CMTE_ID			COMMITTEE ID
+  A 9-character alpha-numeric code assigned to a committee by the Federal Election Commission.
+  The contents of this column are strings.
+
+CAND_ID			CANDIDATE ID
+  A 9-character alpha-numeric code assigned to a candidate by the Federal Election Commission. 
+  The contents of this column are strings.
+
+CAND_NM			CANDIDATE NAME
+  Reported name of the candidate.
+  The contents of this column are strings.
+
+CONTBR_NM		CONTRIBUTOR NAME
+  Reported name of the contributor.
+  The contents of this column are strings.
+
+CONTBR_CITY		CONTRIBUTOR CITY
+  Reported city of the contributor.
+  The contents of this column are strings.
+
+CONTBR_ST		CONTRIBUTOR STATE
+  Reported state of the contributor.
+  The contents of this column are strings.
+
+CONTBR_ZIP		CONTRIBUTOR ZIP CODE
+  Reported zip code of the contributor.
+  The contents of this column are strings but effectively integers. If doesn't make sense to run `summary(as.numeric(all.contribs$contbr_zip))`, though, as the values are categorical. Valid values are 5 or 9 digits in length, though we see a number of invalid entries, as well.
+
+CONTBR_EMPLOYER		CONTRIBUTOR EMPLOYER
+  Reported employer of the contributor.
+  The contents of this column are strings.
+
+CONTBR_OCCUPATION	CONTRIBUTOR OCCUPATION
+  Reported occupation of the contributor.
+  The contents of this column are strings.
+
+CONTB_RECEIPT_AMT	CONTRIBUTION RECEIPT AMOUNT
+  Reported contribution amount in US dollars (USD).
+  The contents of this column are numeric quantities (more specifically, positive and negative floats, as some entries represent refunds and the like whereas others represent positive contributions). We see a significant disparity between the median (28) and the mean (126) as well as a large maximum value (12777706), so the data is heavily skewed.
+
+CONTB_RECEIPT_DT	CONTRIBUTION RECEIPT DATE
+  Reported contribution receipt date.  The date format is DD-MMM-YYYY.
+  The contents of this column are strings that more usefully, may be converted into date objects of some sort. Specifically, we may use the `yearmn` function to categorize by month and year, the `as.Date` function, or the `ymd` function from `lubridate`.
+
+RECEIPT_DESC		RECEIPT DESCRIPTION
+  Additional information reported by the committee about a specific contribution. 
+  The contents of this column are strings.
+
+MEMO_CD			MEMO CODE
+  'X' indicates the reporting committee has provided additional text to describe a specific contribution.
+  The contents of this column are strings.
+
+MEMO_TEXT		MEMO TEXT
+  Additional information reported by the committee about a specific contribution.
+  The contents of this column are strings.
+
+FORM_TP			FORM TYPE
+  Indicates what schedule and line number the reporting committee reported a specific transaction.   
+    SA17A:  Form 3P Schedule A Line 17A
+    SA18:   Form 3P Schedule A Line 18
+    SB28A:  Form 3P Schedule B Line 28A  
+  The contents of this column are strings.
+
+FILE_NUM		FILE NUMBER
+  A unique number assigned to a report and all its associated transactions.   
+  The contents of this column are numeric (specifically, integers ranging from 1003942 to 1146285)
+
+TRAN_ID			TRANSACTION ID
+  A unique identifier permanently associated with each itemization or transaction appearing in an FEC electronic file.
+  The contents of this column are strings.
+
+ELECTION_TP		ELECTION TYPE/PRIMARY GENERAL INDICATOR
+  This code indicates the election for which the contribution was made. EYYYY (election plus election year)
+    P = Primary
+    G = General
+    O = Other
+    C = Convention
+    R = Runoff
+    S = Special
+    E = Recount
+  The contents of this column are strings.
+
+# A Brief Glimpse
+
+Let's look at a subset of this data
+```{r}
+# The following extracts the first twelve rows of the data.
+#  We specify the row numbers 1:12
+contribs[1:12,]
+```
+
+It looks like null values appears in several forms in this data. In the contbr_employer column, we see both "N/A" if the individual has retired. In the receipt_desc column, we see NA values. Let's rectify that.
+
+```{r}
+contribs[contribs=="N/A"] <- NA
+contribs$contbr_employer <- ifelse(contribs$contbr_occupation == "RETIRED", "RETIRED", contribs$contbr_employer)
+```
+
+## cmte_id and cand_nm
+
+Let's take a look at the first column, cmte_id. Candidates have corresponding committees so the number of committees should equal the number of candidates (this is tested in test 1) and we should see a commensurate number of observations of each commmittee and of each candidate (this is tested in test 2) and vice versa (this is tested in test 3). Let's test these.
+
+```{r}
+print("Conducting test 1...")
+
+if (dim(table(contribs$cmte_id)) == dim(table(contribs$cand_id))) {
+  print('Test 1 passed')
+}
+
+print("Conducting test 2...")
+
+committees = table(contribs$cmte_id)
+candidates = table(contribs$cand_nm)
+mismatched.committees = vector()
+num_mismatches = 0
+for (i in 1:25) {
+  if (!(committees[i] %in% candidates)) {
+    #print(paste(committees[i],' has no match'))} 
+    num_mismatches++
+    append(mismatched.committees, committees[i])
+  }
+  #else {
+  #  print(paste(committees[i],' has a match'))
+  #}
+}
+if (num_mismatches > 0) {
+  print("Test 2 failed")
+} else {
+  print("Test 2 passed")
+}
+
+print("Conducting test 3...")
+
+mismatched.candidates = vector()
+num_mismatches = 0
+for (i in 1:25) {
+  if (!(candidates[i] %in% committees)) {
+    #print(paste(committees[i],' has no match'))} 
+    num_mismatches++
+    append(mismatched.candidates, candidates[i])
+  }
+  #else {
+  #  print(paste(committees[i],' has a match'))
+  #}
+}
+if (num_mismatches > 0) {
+  print("Test 3 failed")
+} else {
+  print("Test 3 passed")
+}
+rm(committees)
+```
+
+## Representativeness
+
+Terrific. We'd like to consider contributions from California. First, let's see if contributions in California are somewhat similar to those made in the entire nation. For this purpose, we'll ignore invalid states such as "20" and "30", as these do not seem significant. The most obviously incorrect recorded state, "ZZ", has 8670 associated contributions but the rest have typically less than 10 associated contributions, so it doesn't seem this decision will render our analysis significantly incorrect.
+
+```{r}
+contribs.amts <- cbind(contribs %>% 
+  group_by(cand_nm) %>% 
+  summarise(total.amount.CA = sum(contb_receipt_amt),
+            number.CA = n()),
+  all.contribs %>%
+  group_by(cand_nm) %>% 
+  summarise(total.amount.nation = sum(contb_receipt_amt),
+            number.nation = n()))[,c(1,2,3,5,6)] 
+# we specify all columns except 4 because it is redundant
+
+contribs.amts$cand_nm <- unlist(lapply(
+  contribs.amts$cand_nm, function(x) strsplit(x, split = ',')[[1]][1]))
+
+contribs.amts$fract.number <-
+  contribs.amts$number.CA / contribs.amts$number.nation
+
+contribs.amts$fract.amt <- 
+  contribs.amts$total.amount.CA / contribs.amts$total.amount.nation
+
+contribs.amts <- melt(contribs.amts[,c("cand_nm", "fract.number",
+                                       "fract.amt")], id.vars = "cand_nm")
+
+ggplot(data = contribs.amts,
+       aes(x = cand_nm, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  xlab("Candidate") + ylab("Proportion of Contributions") +
+  ggtitle("Proportions of Nationwide Contributions That Were Made in CA") +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  scale_fill_discrete(name = "Proportions",
+                      breaks = c("fract.number", "fract.amt"),
+                      labels = c("Number", "Amount"))
+```
+
+```{r}
+# Summary of the proportion of contribution frequency associated with California
+summary(contribs.amts[contribs.amts$variable=="fract.number", "value"])
+
+# Summary of the proportion of financial contribution sum associated with California
+summary(contribs.amts[contribs.amts$variable=="fract.amt", "value"])
+```
+
+From the above we see that contributions in California differ significantly from contributions made in all of the United States. Some differences are in accordance with that which may be expected from the reputation of California as a strongly blue state. For instance, more contributions were made for Clinton and Sanders than almost any other Republican candidate. What is strange is that a large quantity and amount of contributions were made in California, a stereotypically Democratic state, to Fiorina, a Republican candidate, relative to Democratic and Independent party candidates. We also see that those responsible for these contributions tended to make larger contributions.
+
+Californians also seem responsible for a disproportionate number of contributions and amount contributed, especially to Lawrence Lessig and Jill Stein. Californians contributed 30% of contributions to Lessig and Stein but also regularly were responsible for close to 10% (sometimes less, but often more) of contributions to candidates, even though California is just one of fifty states (more than fifty if you also include the American Samoa, Guam, Northern Mariana Islands, Puerto Rico, and/or the U.S. Virgin Islands).
+
+This graph further shows that relative to much of the rest of the nation, California seems relatively politically active and strongly blue. Jindal and Lessig both withdrew their respective campaigns quite early (in 2015) and should be relatively unknown in California, but contributions from California already make up nearly a third of all contributions to Lessig and only a relatively small fraction of contributions to Jindal. The significant difference suggests strong Democratic preferences of Californians.
+
+## Contribution Frequency
+
+Now, let's consider the number of contributions (associated with the state of California) made for each candidate.
+
+```{r}
+table(contribs$cand_nm)
+```
+
+As one might expect, knowing the stereotypical political leaning of Californians, Clinton received the most contributions. She even received 69% more contributions than Sanders, who was often said during the time to have received an inordinately large number of contributions. The most popular Republican, Donald Trump, received about 1/8th as many contributions as Clinton.
+
+We also see that the majority of Republican candidates received far fewer contributions. As an extreme example, James S. Gilmore only received a measly 3 contributions.
+
+## Contribution Frequency and Amount
+
+It's curious how much each candidate received in contributions. One might be interested how these figures compare to the number of contributions received.
+
+```{r}
+amounts <- contribs %>%
+  group_by(cand_nm) %>%
+  summarise(Contribution.Amount = sum(contb_receipt_amt))
+
+candidates <- as.data.frame(candidates)
+cand.contribs <- merge(x = candidates, y = amounts, 
+                by.x = "Var1", by.y = "cand_nm")
+
+cand.contribs <- melt(cand.contribs, id.vars = "Var1")
+
+names(cand.contribs) <- c("Candidate", "Variable", "Value")
+
+cand.contribs$Candidate <- unlist(lapply(cand.contribs$Candidate,
+                                         function(x) (
+                                           strsplit(as.character(x), 
+                                                    split = ',')[[1]])[1]))
+
+ggplot(data = cand.contribs, aes(x = Candidate, y = log10(Value),
+                        fill=Variable)) +
+  geom_bar(position = position_dodge(width=0.5), stat="identity") +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  ggtitle("Contributions to each Candidate") +
+  ylab("Log10 Value") + xlab("Candidate") +
+  guides(fill=guide_legend(title=NULL)) +
+  scale_fill_discrete(breaks=c("Freq", "Contribution.Amount"),
+                      labels=c("Number of Contributions",
+                               "Amount Contributed (USD)"))
+```
+
+```{r}
+# The columns of cand.contribs are "Candidate," "Variable," and "Value". Finding summaries of candidate names and "Variable" seems unnecessary as these are simply categorical variables. We'll look at summaries of "Value" contingent on the value of "Variable" (there are only two possible values of "Variable": "Freq" and "Contribution.Amount")
+
+# For Variable == "Freq"
+print("Number of Contributions")
+summary(cand.contribs[cand.contribs$Variable == "Freq", "Value"])
+
+# For Variable == "Contribution.Amount"
+print("Amount Contributed (USD")
+summary(cand.contribs[cand.contribs$Variable == "Contribution.Amount",
+                      "Value"])
+```
+
+Again, we see a much larger mean than median in both the cases of frequency and contribution amount. This argues that frequencies of contributions for candidates are heavily skewed. In light of this, it should be expected that contribution amounts will also be heavily skewed.
+
+After viewing the plot, it seems like one can reliably say that candidates that received more contributions had a larger sum of money contributed to them, rather than that some candidates had overwhelming numbers of small or large contributions. Particularly interesting is James S. Gilmore, who received far fewer contributions than any other candidate (likely 3) but had a comparable sum of money (log10 value) contributed to him.
+
+```{r}
+cand.contribs[cand.contribs$Candidate == "Gilmore",]
+```
+
+It seems our above plot was excessively crowded, such that the x-axis is not very intelligible. Let's only consider a subset of candidates: "Bush, Jeb", "Clinton, Hillary Rodham", "Cruz, Rafael Edward 'Ted'", "Rubio, Marco", "Sanders, Bernard", and "Trump, Donald J." and disregard other candidates, including "Gilmore, James S III".
+
+```{r}
+subset.cand.nm <- c("Bush, Jeb", "Clinton, Hillary Rodham",
+                    "Cruz, Rafael Edward 'Ted'", "Rubio, Marco",
+                    "Sanders, Bernard", "Trump, Donald J.")
+
+cands <- unlist(lapply(subset.cand.nm,
+                       function(x) strsplit(x, split = ',')[[1]][1])
+                )
+
+subset.cand.contribs <- subset(cand.contribs, Candidate %in% cands)
+
+ggplot(data=subset.cand.contribs, aes(x=Candidate, y=(Value/100000)^(1/3),
+                        fill=Variable)) +
+  geom_bar(position = position_dodge(width=0.5), stat="identity") +
+  ggtitle("Contributions to each Candidate") +
+  ylab("Scaled Value") + xlab("Candidate") +
+  guides(fill=guide_legend(title=NULL)) +
+  scale_fill_discrete(breaks=c("Freq", "Contribution.Amount"),
+                      labels=c("Number of Contributions", "Amount Contributed (USD)"))
+```
+
+```{r}
+# The columns of subset.cand.contribs are "Candidate," "Variable," and "Value". As before, finding summaries of candidate names and "Variable" seems unnecessary as these are simply categorical variables. We'll look at summaries of "Value" contingent on the value of "Variable" (there are only two possible values of "Variable": "Freq" and "Contribution.Amount")
+
+# For Variable == "Freq"
+print("Number of Contributions")
+summary(subset.cand.contribs[subset.cand.contribs$Variable == "Freq", "Value"])
+
+# For Variable == "Contribution.Amount"
+print("Amount Contributed (USD")
+summary(subset.cand.contribs[subset.cand.contribs$Variable == "Contribution.Amount",
+                      "Value"])
+```
+
+Again, we see a wide range of contribution frequencies and amounts, though not as large as previously (when we considered all candidates). The disparities between mean and median values of contribution frequency and amount also decreased but still seem large.
+
+Frankly, nothing in particular seems to stand out from the above graph. One might argue that the contributions to some candidates were, on average, larger than the contributions to another candidate, such as contributions to Sanders relative to those to Trump, but the differences don't seem too noteworthy, especially since we scaled the values quite substantially. It seems more apt to look at median contribution amounts (dollar amounts are heavily skewed, as extreme values are present and render figures deceptie; we'll also calculate mean amounts for reference) and at proportions for that purpose.
+
+## Median and Mean Contribution Amounts
+
+```{r}
+# Median Amounts
+for (i in 1:length(candidates$Var1)) {
+  print(paste0(candidates$Var1[i], " average contribution amount: $", 
+              median(unlist(
+                contribs[contribs$cand_nm==candidates$Var1[i],
+                         "contb_receipt_amt"]))))
+}
+
+# Mean Amounts
+for (i in 1:length(candidates$Var1)) {
+  print(paste0(candidates$Var1[i], " average contribution amount: $", 
+              mean(unlist(
+                contribs[contribs$cand_nm==candidates$Var1[i],
+                         "contb_receipt_amt"]))))
+}
+rm(candidates)
+```
+
+As previously stated, California is notoriously a strongly "blue" state. Differences between contributions to candidates in the same party seem to be of greater import. Lets start by looking at Republican candidates. 
+
+It seems the most obscure and the most well-established candidates received the largest contributions. James S. Gilmore, the least "successful" candidate in the election, had, by far, the largest median contribution amount. It seems somewhat surprising that Carly Fiorina and Marco Rubio received relatively diminutive contributions. It seems rather trivial, however, that the most obscure and most well-established candidates will receive larger contributions. Such is to be expected, but one might be glad to have this numerical support of the principle.
+
+The most prominent independent candidates, Gary Johnson (Libertarian Party) and Jill Stein (Green Party), also received relatively small average contributions. The average size of contributions to Trump was smaller than that to every other Republican candidate, save for Ted Cruz.
+
+### Clinton and Sanders
+
+On the Democratic side, Clinton and Sanders both tended to receive much smaller contributions. If we look at median amounts, that received by both candidates is similar, though the average amount Sanders enjoyed was just over 1/3 (about 35%, to be exact) that enjoyed by Clinton. Both candidates received relatively large contributions that dragged up their average contribution sizes, but Hillary seems to have received either far larger or far more relatively large contributions, as her average contribution size was dragged up much more. This isn't too surprising if one considers that her campaign was, in a sense, about twice as long as that of Sanders, given that she won the primary election and Sanders lost. At least as far as California goes, it seems the contributions that the two received are very similar. Let's look at more specific graphs to confirm this hypothesis. We'll look at density of positive contribution amounts, as negative amounts (e.g., because of refunds, errors, etc.) may render some statistics, such as a portion of those in five number summaries, deceptive.
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(data = subset(contribs, cand_nm %in% c("Clinton, Hillary Rodham",
+                                              "Sanders, Bernard")),
+       aes(x = contb_receipt_amt, y = ..density.. , color = cand_nm)) +
+  geom_freqpoly(binwidth = 10) + xlim(0, 550) +
+  ggtitle(
+    "Proportion of Contribution Amounts to Clinton and Sanders (Only CA)"
+    ) +
+  ylab("Proportion") + xlab("Contribution Amount (USD)") +
+  scale_color_manual(guide = guide_legend(title = ""),
+                     values = c("orange1", "slateblue"))
+```
+
+```{r}
+summary(
+  subset(
+    contribs, cand_nm == "Clinton, Hillary Rodham")[,"contb_receipt_amt"]
+  )
+
+summary(
+  subset(
+    contribs, cand_nm =="Sanders, Bernard")[,"contb_receipt_amt"]
+  )
+```
+
+Indeed, it seems the two received similar contributions in terms of size. We see peaks at similar points (e.g., for 50, 100, 200, 250, etc.). To be fair, whereas both candidates saw many of the same peaks, it seems that the higher peaks (e.g., 50, 150, 200, 250, 500, etc.) provided for a greater proportion of contributions to Clinton than contributions to Sanders. Contributions of 10 and 50 comprised a greater proportion of contributions to Sanders than contributions to Clinton so the trend is not completely consistent, but these might be compensated for by the fact that a greater portion of contributions to Clinton were for 5, 50, 200, and so on. it seems that for the most part, financial contributions to Sanders were smaller in size. If we view the same plot for contributions across the entire nation and use much larger bins, we may draw the same conclusion - both enjoyed somewhat similar contribution sizes, but larger contributions comprise a larger proportion of contributions to Clinton than to Sanders.
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(data = subset(all.contribs, cand_nm %in% c("Clinton, Hillary Rodham",
+                                                  "Sanders, Bernard")),
+       aes(x = contb_receipt_amt, y = ..density.. , color = cand_nm)) +
+  geom_freqpoly(binwidth = 100) + xlim(0, 3000) +
+  ggtitle(
+    "Proportion of Contribution Amounts to Clinton and Sanders (Nationwide)"
+    ) +
+  ylab("Proportion") + xlab("Contribution Amount (USD)") +
+  scale_color_manual(guide = guide_legend(title = ""),
+                     values = c("orange1", "slateblue"))
+```
+
+```{r}
+# All amounts are in US dollars
+
+summary(
+  subset(
+    all.contribs, cand_nm == "Clinton, Hillary Rodham")[,"contb_receipt_amt"]
+  )
+
+summary(
+  subset(
+    all.contribs, cand_nm =="Sanders, Bernard")[,"contb_receipt_amt"]
+  )
+```
+
+Another Democratic candidate, Jim Webb, enjoyed substantially larger average and median contribution amounts than both Clinton and Sanders but he did not seem significant in the race. 
+
+It seems that contributers to Republicans are more affluent and/or generous, though. It doesn't seem surprising that the most seemingly significant Democratic candidates, Clinton and Sanders, received substantially more contributions than any other candidate in the strongly "blue" state of California. It is surprising, however, that the most prominent Democratic candidates received relatively small contributions on average, whereas Jim Webb received a much larger average contribution amount.
+
+### Nationwide Comparison
+
+Let's compare this to what financial contributions from all of the United States in order to see if any of these attributes are mirrored in the rest of the country
+
+```{r}
+# Median Amounts
+cands <- unique(all.contribs$cand_nm)
+for (i in 1:length(cands)) {
+  print(paste0(cands[i], " Median Contribution Amount: $", 
+              median(unlist(
+                all.contribs[all.contribs$cand_nm==cands[i],
+                             "contb_receipt_amt"]))))
+}
+
+# Mean Amounts
+for (i in 1:length(cands)) {
+  print(paste0(cands[i], " Average Contribution Amount: $", 
+              mean(unlist(
+                all.contribs[all.contribs$cand_nm==cands[i],
+                             "contb_receipt_amt"]))))
+}
+```
+
+It seems that indeed, more established candidates and relatively obscure candidates tended to have higher average contribution amounts, with the notable exceptions of Marco Rubio and Ted Cruz. Here we see that indeed, the average financial contribution amount to Bernie Sanders is about 1/3 of that to Hillary Clinton. Also, nationwide averages of financial contributions to relatively obscure individuals such as to James Gilmore and George Pataki are not as extreme as in California, perhaps because we now have a larger "pool" of contributions from which to make calculations. Again, we see that the most prominent Independent candidates (Jill Stein and Gary Johnson; McMullin did not feature very prominently) enjoyed relatively low but still respectable financial contribution amounts, with greater average and median amounts than the two most prominent Democrats.
+
+Let's look at financial contributions at a finer level. We'll examine the individuals that made the most contributions.
+
+## Top Contributors
+
+```{r}
+top_contbrs <- names(sort(table(contribs$contbr_nm), decreasing=T)[1:15])
+
+# Print the name of the contributer and the number of contributions by that
+#  individual
+for (i in 1:length(top_contbrs)) {
+  print(top_contbrs[i])
+  print(table(contribs[contribs$contbr_nm == top_contbrs[i],]$cand_nm))
+}
+```
+
+It looks like those responsible for the most financial contributions (by quantity, not quality) contributed almost exclusively to Clinton. A few individuals contributed relatively infrequently to two other candidates, Bernie Sanders and Ted Cruz. The fact that one contributer is associated with contributions to both a Democratic and a Republican candidate is interesting. The number is so large that the person had to have been making a contribution every 2 days (the primary season is about 1.5 years long). Let's examine this individual, Mark Reynolds, in more detail.
+
+```{r}
+with(contribs[contribs$contbr_nm == "REYNOLDS, MARK",],
+     table(cand_nm, contbr_employer))
+```
+
+It seems the Mark Reynolds that contributed to Clinton's campaign is different from the Mark Reynolds that contributed to Cruz's campaign. Further, it seems like multiple individuals with the name Mark Reynolds contributed to Clinton's campaign. It seems quite probable that the same individual switched jobs multiple times and that multiple individuals share the same name. Without a unique identifier of contributer, it is difficult to determine how many individuals we're dealing with here. It does seem curious that one individual would make multiple financial contributions. Perhaps this is indicative of a dishonest practice. To be fair, though, this could be common practice. Affluent contributers might choose to make a large contribution at one time, perhaps at a fundraising dinner or other event, whereas less affluent contributers may merely choose to allocate a small fraction of every paycheck received on a monthly basis. Again, the details of this tendency aren't illuminated exactly in this dataset, as we aren't given a unique identifier of contributers, but the possible existence of this practice at least suggests further investigation.
+
+I'd like to take a closer look. It seems we have a good chance of isolating a single individual if we subset also by the employer. To be fair, it seems isolation is more likely if we select a smaller company. Visa, Inc. is not a small company so we may be better off choosing another individual. Let's try using "MEISTER, JACOB," for the name seems less common. First, we'll check to see if the employer associated with the most contributions is a smaller employer, as such an employer is less likely to employ multiple individuals with the same name.
+
+```{r}
+with(contribs[contribs$contbr_nm == "MEISTER, JACOB",],
+     table(cand_nm, contbr_employer))
+```
+
+Terrific - it seems like "NOLAN BARTON BRADFORD OLMOS LLP" is a much smaller employer and we're thus less likely to be looking at multiple individuals. Let's look at the days on which he made contributions.
+
+```{r}
+contribs$contb_receipt_dt <- ymd(contribs$contb_receipt_dt)
+contribs <- contribs[order(contribs$contb_receipt_dt),]
+
+with(contribs[contribs$contbr_nm == "MEISTER, JACOB",], table(contb_receipt_dt))
+```
+
+The above seems worthy of attention. We see dates as early as in 2001, which may not be surprising since many expected her to run (2016 is oddly specific, though). Dates 2017 and beyond seem strange, though. We'll assume that the FEC may recognize commitments to payments at future dates and will issue receipts for such payments.
+
+It's difficult to imagine future payments being made, given that if Clinton had won the 2016 election and had been reelected in 2020, she would not have been able to campaign in any election after that. For all we know, she might be out of public office and in another country or met an unfortunate circumstance after 2024. However, it seems Meister has made payments for Clinton's presidential campaign as far as in 2031. Further, it was commonly assumed that Clinton would win the 2016 election and if that were true, winning the 2020 election would be somewhat likely assuming that she'd be as great of a president as her ardent supporters believed, but Meister is most active in the sphere of financial contributions during years beyond 2024 (i.e., by what seems to be logical reasoning of a passionate supporter, the point at which Clinton would be out of the presidential office and no longer able to run for the position).
+
+If we look at the tabular results, we see that receipts are for payments on the 16th of each month. That would render future payments more credible, as one may subscriber to a recurring monthly payment (perhaps all candidates have a similar system in place, as the contribution receipt dates for all candidates are typically on the 15th or 16th of each month, as the below cell shows). Less credible, however, is the fact that there are often receipts for four or more payments each day (e.g., 6 on May 16, 2028 (almost 12 years after her 2016 campaign!), 5 exactly 9 months from then, 4 another 2 months from then, etc.). The data we are presently analyzing isn't sufficient for us to derive any definite conclusions regarding integrity in this arena, but it certainly does raise suspicion.
+
+```{r}
+unique(contribs$contb_receipt_dt)[1:50]
+```
+
+Next, we have a frequency plot that allows one to visualize some of this information more easily. We'll use a histogram rather than a line plot because we don't want to imply that intermediate numbers of contribution receipts occurred on dates which no contribution receipts contained. The code for a line graph is specified, though, in case my message isn't clear.
+
+# Contribution Receipt Date Frequency
+
+```{r, message = FALSE, warning = FALSE}
+# # Code for a line graph
+# ggplot(data = data.frame(
+#   table(
+#     subset(
+#       contribs, contbr_nm == "MEISTER, JACOB")$contb_receipt_dt)
+#   ), aes(x = as.Date(Var1), y = Freq)) +
+#   geom_line() +
+#   ggtitle("Contribution Frequency of Jacob Meister") +
+#  xlab("Receipt Date") +
+#  ylab("Frequency")
+
+# Code for a histogram
+ggplot(data = subset(contribs, contbr_nm == "MEISTER, JACOB"),
+                     aes(x = contb_receipt_dt)) +
+  geom_histogram(stat = "count") +
+  ggtitle("Contribution Frequency of Jacob Meister") +
+  xlab("Receipt Date") +
+  ylab("Frequency")
+```
+
+```{r}
+summary(subset(contribs, contbr_nm == "MEISTER, JACOB")$contb_receipt_dt)
+```
+
+For some perspective, let's take a look at the financial contributions to all candidates from all financial contributors.
+
+```{r, message = FALSE, warning = FALSE}
+contribs$contb_receipt_dt_ym <- ymd(contribs$contb_receipt_dt)
+
+contribs <- contribs %>% 
+  mutate(contb_receipt_dt_ym = as.yearmon(contb_receipt_dt))
+
+ggplot(data = subset(contribs),
+                     aes(x = contb_receipt_dt_ym)) +
+  geom_histogram(stat = "count") + facet_wrap(~ cand_nm, scales = "free") +
+  theme(text = element_text(size=8)) +
+  xlab("Year") + ylab("Number of Contributions") +
+  ggtitle("Number of Contribution Receipt Dates")
+```
+
+```{r}
+with(contribs, by(contb_receipt_dt_ym, cand_nm, summary))
+```
+
+## Average Number of Daily Contributions (Estimated)
+
+From this plot, we see that it's actually quite common for contribution receipts to be dated some time into the future. With the exceptions of James Gilmore III, Bobby Jindal, Marco Rubio, Donald Trump, and Jim Webb, it seems candidates typically have as many or more future contributions than current or past contributions. It's quite possible that these represent pledged contributions, which would partially explain Jacob Meister's having receipts for payments on future dates. If he already is subscribed to monthly payments and campaign employees solicit financial contributions from him on many an occasion and/or if he often decides he'd like to contribute more to Clinton in terms of finances, Meister may often add another committed payment to his subscription and, for the sake of convenience, use a date he already has a commitment on.
+
+It seems we should take a look more closely at financial contributions in more detail to another candidate. Above, we found that "PENDERGAST, JAN" also contributed many times (245, to be exact) to another candidate - Ted Cruz. Let's take a look at her financial contributions.
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(data = subset(contribs, contbr_nm == "PENDERGAST, JAN"),
+                     aes(x = contb_receipt_dt)) +
+  geom_histogram(stat = "count") +
+  xlab("Date") + ylab("Number of Contributions") +
+  ggtitle("Number of Contribution By Jan Pendergast")
+
+# Amounts are in US dollars
+with(subset(contribs, contbr_nm == "PENDERGAST, JAN" &
+              contb_receipt_dt_ym > as.yearmon('Nov 2016')),
+     table(contb_receipt_amt))
+
+pendergast.contribs <- subset(contribs, contbr_nm == "PENDERGAST, JAN" &
+              contb_receipt_dt_ym > as.yearmon('Nov 2016'))
+
+ggplot(data = pendergast.contribs, aes(x = contb_receipt_dt_ym,
+                                       y = contb_receipt_amt)) +
+  geom_bar(stat = "identity") + xlab("Date") +
+  ylab("Contribution Amount (USD)") +
+  ggtitle("Contribution Amounts By Jan Pendergast")
+
+rm(pendergast.contribs)
+```
+
+```{r}
+summary(subset(contribs, contbr_nm == "PENDERGAST, JAN" &
+              contb_receipt_dt_ym > as.yearmon('Nov 2016'))$contb_receipt_dt_ym)
+```
+
+Pendergast also was recorded as making multiple contributions on the same day (as many as 24!). A notable difference with Pendergast is that she often has identical numbers of transactions on similar dates, as the numerous pairs of identical bars in the above plot show. From a naive standpoint, it may seem strange for people to have many contribution receipts dated in the future with many receipts sharing dates, though it may perhaps not be uncommon.
+
+It is trivial to assert that all supporters made at least one contribution, but one might also like to know how many contributions supporters made each day, on average, as the practice by Meister and Pendergast of making multiple contributions each day seems noteworthy. Thus, we'll calculate the average daily number of contributions made by each of the recorded supporters. Contributers will be categorized by their average daily number of contributions. We'll use categories of [0,1) (less than one contribution per day for which contribution receipts were associated), [1, 2) and [2, $\infty$), then divide by the total number of records so as to obtain proportions. In this way, we'll be able to assess the proportion of users that made one or fewer than one average contribution per day, more than one or fewer than two contributions per day, on average (this should cover erroneous contributions), and more than two contributions per day. Then, we'll look at the raw numerical results and plot them.
+
+```{r, message = FALSE, warning = FALSE}
+
+n.contribs <- contribs %>% 
+  select(contbr_nm, contb_receipt_dt) %>% 
+  group_by(contbr_nm, contb_receipt_dt) %>% 
+  mutate(number.contributions = n()) %>% 
+  distinct() %>% 
+  group_by(contbr_nm) %>% 
+  mutate(n.per.day = mean(number.contributions))
+
+n.contribs$n.per.day.buckets <- cut(
+  n.contribs$n.per.day, breaks=c(0:2, Inf), right=T)
+
+n.contribs.buckets <-
+  summary(n.contribs$n.per.day.buckets) / nrow(n.contribs)
+
+n.contribs.buckets <- data.frame(
+  names(n.contribs.buckets),
+  as.vector(n.contribs.buckets))
+
+colnames(n.contribs.buckets) <- c("Bucket", "Proportion")
+
+ggplot(data = n.contribs.buckets, 
+       aes(x = Bucket, y = Proportion)) +
+  geom_bar(stat = "identity") + xlab("Proportion") +
+  xlab("Average Number of Contributions Per Day") +
+  ggtitle(
+    "Proportion of Contributors Making a Number of Daily Contributions"
+    ) +
+  coord_flip()
+```
+
+```{r}
+n.contribs.buckets
+```
+
+The faceted plot of the number of contributions received over time by all candidates shows that almost every candidate has contributions with receipts dated far after their campaigns, whereas the plot immediately above shows that supporters typically contribute an average of twice or less than twice a day on each day that they make a contribution. We actually see that an average daily number of contributions of more than one is more common than one (it is actually impossible for a recorded contributer to make less than an average of less than one contribution per day on each day that the entity makes a contribution. The fact that such a small percentage (approximately 0.7%) of contributors make more than an average of two contributions per day, tells us that those that have contributed more than two times on one day tend to make between one and two, inclusive, contributions per day - activity that seems more credulous - and/or are few and far between.
+
+Thus, at this point, this contribution activity of making more than one contribution per day piques curiosity, but doesn't arouse suspicion. It seems especially strange that Pendergast often has the same number of receipts on two dates (i.e., pairs of identical bars in the plot above), though I may be making much about nothing.
+
+Let's move on then. We'll finally take a look at the number of contributions over time and space. We already looked at variations in the quantity of contributions over time above, but it also seems likely that people in the same locale will receive similar inspiration from spatially specific events (e.g., a candidate promising to provide funding or amenties for a specific purpose near and dear to the hearts of the population if said candidate is elected) and entire populations of different locales will display shifting activity with respect to financial contributions over time.
+
+# Contribution Activity Over Space
+
+```{r}
+data(zipcode)
+zipcode <- subset(zipcode, state == "CA")
+
+# If we only consider the first five digits of every zip code, we lose location
+#  detail that doesn't seem significant, but we'll be able to disregard some 
+#  mistakes (e.g., one is more likely to make a mistake if writing in a longer
+#  string of numbers) and we'll be better able to match entries with data in
+#  the zipcode dataset, instead of resorting to another resource such as
+#  geocoding with the Google Maps API.
+contribs$contb_zip5 <- substr(contribs$contbr_zip, start = 1, stop = 5)
+
+# Cities in contribs but not in zipcode
+unique(contribs$contbr_city[!(contribs$contbr_city %in% zipcode$city)])[1:100]
+# Notice that most of these seem to be mispellings (e.g., Vakencia), incorrect
+#  (e.g., Kcnp), or comprehensible by humans but not in existence in our strict
+#  data (e.g., Mc Farland, East Palo Alto, S San Fran, and etc.). It seems
+#  that we'll have to give up a significant amount of data if we insist
+#  on using city names only
+#
+# It seems likely that when mismatches occur (e.g., because of mispelling),
+#  the responsible party may be acting carelessly or indifferently, and
+#  will thus also likelyinput an invalid zipcode. We see that 33,073 entries
+#  contain invalid cities but only 839 entries have invalid zipcodes.
+#  Approximately 13 of these (the actual figure is probably higher but perhaps
+#  not by much) correspond to unique contributors. By this, the use of zipcodes
+#  (i.e., without resorting to performing a spell check on city names or another 
+#  tactic), will not yield results that are concerningly different from that
+#  which a great deal of time expenditure may net.
+sum(!(contribs$contbr_city %in% zipcode$city))
+sum(!(contribs$contb_zip5 %in% zipcode$zip))
+length(unique(contribs$cand_nm[!(contribs$contb_zip5 %in% zipcode$zip)]))
+
+zipcode$coords <- paste0('(', format(round(zipcode$latitude, 4), nsmall = 4),
+                         ', ', format(round(zipcode$longitude, 4), nsmall = 4),
+                         ')')
+
+# We'll remove contributions with invalid zipcodes (839 entries; for
+#  reference, the data consists of 1,304,346 entries). These may be
+#  erroneous entries.
+contribs <- contribs[contribs$contb_zip5 %in% zipcode$zip,]
+contribs <- merge(x = contribs[contribs$contb_zip5 %in% zipcode$zip,],
+                  y = zipcode, by.x = 'contb_zip5', by.y = 'zip')
+
+# We can view the first fiew rows of the data to get some verification
+#  that the data was merged correctly. Of course, this doesn't constitute
+#  a definitive check but should be sufficient for our purposes
+contribs <- contribs[order(contribs$contb_receipt_dt),]
+```
+
+## Density
+
+```{r, message = FALSE, warning = FALSE}
+ggmap(get_map(location = "california", zoom = 6, maptype = "toner-lite")) + 
+  geom_density2d(data = contribs,
+                 aes(x = longitude, y = latitude), size = 0.3) + 
+  stat_density2d(data = contribs, 
+                 aes(x = longitude, y = latitude, fill = ..level.., 
+                     alpha = ..level..), size = 0.01, 
+                 bins = 16, geom = "polygon") + 
+  scale_fill_gradient(low = "green", high = "red") + 
+  scale_alpha(range = c(0, 0.3), guide = FALSE) +
+  scale_color_discrete("") + theme_nothing()
+```
+
+In the above, we look at the density of contributions over space (i.e., where in California we see significant proportions of associated contributions). If we look at the above graph, we see that the number of contributions made in the major metropolitan areas around the San Francisco Bay Area, Sacremento, Los Angeles, and San Diego so greatly dwarfs the number of contributions made in other parts of the state as to render these arguably meaningless in quantity. To be sure, contributions were made in less prominent parts of California, as can be seen by a simple glance at the cities associated with donations, as below.
+
+## (Somewhat) Absolute Frequency and Amount
+
+```{r, message = FALSE, warning = FALSE}
+contrib.amts <- contribs %>% 
+  select(cand_nm, contb_receipt_dt, contb_receipt_amt, latitude,
+         longitude, city) %>% 
+  group_by(cand_nm, contb_receipt_dt, latitude, longitude) %>% 
+  mutate(total.amount = sum(contb_receipt_amt, na.rm = T)) %>% 
+  filter(total.amount > 0)
+
+contrib.amts <- contrib.amts[!duplicated(contrib.amts[, c("cand_nm",
+                                                          "contb_receipt_dt",
+                                                          "city")]
+                                         ), ]
+
+max.amt <- max(contrib.amts$total.amount)
+ggmap(get_map(location = "california", zoom = 6, maptype = "toner-lite")) + 
+  geom_point(data = contrib.amts, aes(x = longitude, y = latitude),
+             alpha = contrib.amts$total.amount / max.amt / 3.5,
+             color = "orange") +
+  theme_nothing()
+```
+
+In the above plot, we plot points for every instance rather than only indicating the areas with greater proportions of contributions made. We also use transparency to indicate contribution size. We set the alpha level so as to add the size of financial contributions to the above visualization. We see that even when the max alpha is divided by 3.5, there were so many contributions associated with the aforementioned major metropolitan areas as to create dark areas. To be fair, contributions made in less prominent regions of the state are still large and/or numerous enough to render areas of the map at least slightly orange. In particular, Fresno and Bakersfield are colored in a decently dark shade of orange.
+
+## Frequency by Candidate Over Space
+
+Another aspect one may be interested is the candidates to which contributions were made. We'll examine that next. For this investigation, we'll also subset the data to contain only prominent candidates. Such a change doesn't result in a greatly reduced quantity of data.
+
+```{r, message = FALSE, warning = FALSE}
+cand.list <- c("Paul, Rand", "Clinton, Hillary Rodham", "Sanders, Bernard",
+               "Cruz, Rafael Edward 'Ted'", "Trump, Donald J.", "Rubio, Marco",
+               "Johnson, Gary", "Stein, Jill")
+
+contribs.prominent.cands <- contribs[contribs$cand_nm %in% cand.list,] 
+
+ggmap(get_map(location = "california", zoom = 6, maptype = "toner-lite")) + 
+  geom_point(data = contribs.prominent.cands, aes(x = longitude, y = latitude,
+                                                  color = cand_nm),
+             size = .3, alpha = .05) +
+  scale_color_discrete("Candidate Name") +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size = 10)))
+```
+
+In the above, we see a large number of contributions in all corners of the state made for both Sanders and Clinton. We used a low alpha value, but sky blue (e.g., that corrresponding to Sanders) is still quite prominent. Frankly, the major metropolitan areas appear rather like something in between brown and gray (the hue will be henceforth referred to as "brown"), which is the result of amalgamating a significant amount (the alpha level was low but many contributions were recorded) all of these disparate colors. On the one hand, the color blue, as well as a smattering of purple (e.g., representing Stein and arguably Trump, to some extent) quite stands out in the above plot, which is testament to how strongly blue the state is, but many regions are more brown than purple (the combination of blue and red, as well as the color corresponding to Jill Stein in the above plot), even with the low alpha value used, which argues that the population of California is perhaps more politically diverse than some may believe. 
+
+```{r}
+print("List of locales with which contributions are associated:")
+unique(contribs$contbr_city)[1:20]
+```
+
+However, the financial sum contributed may also only be significant, for the most part, in the aforementioned metropolitan areas. 
+
+## Frequency Over Time and Space
+
+Let's now look at how the frequency of receipt dates of financial contributions changed over time. We'll have five time categories:
+  
+  * Category 1: all dates before 2015. The first declarations of candidacy didn't occur until March of 2015 so contributions prior to this date are likely speculative at best if we assume the mass public doesn't possess insider knowledge.
+  
+  * Category 2: all dates both before February 1, 2016 and not in Category 1. The first of the primaries and caucuses occurred on February 1, 2016. One might want one category to include dates after the declarations and withdrawals of all relevant candidates but there is no earlier date by which all relevant candidates declared and/or withdrew since many ran as Republican candidates and many Republican candidates withdrew throughout the primary season
+  
+  * Category 3: all dates both before July 2016 and not in Category 2. The final primaries and caucuses were held in June 2016.
+  
+  * Category 4: all dates both before December 2016 and not in Category 3. Election day occurred on November 18, 2016.
+  
+  * Category 5: all dates not in the preceding categories. For reference, the electoral results were announced in January 2017 and this category includes all dates after that.
+
+```{r, message = FALSE, warning = FALSE}
+# The cut() function might seem more appropriate here, but has undesirable
+#  results so we'll use ifelse() functions.
+time.categories <- c("Before 2015", "2015 - 2/2016", "2/2016 - 7/2016",
+                     "7/2016 - 12/2016", "12/2016 And Beyond")
+
+contribs$contb_receipt_dt <- as.Date(contribs$contb_receipt_dt)
+contribs$time.category <- ifelse(
+  contribs$contb_receipt_dt < as.Date("2015-01-01"), time.categories[1], 
+  ifelse(contribs$contb_receipt_dt < as.Date("2016-02-01"), time.categories[2], 
+         ifelse(contribs$contb_receipt_dt < as.Date("2016-07-01"),
+                time.categories[3],
+                ifelse(contribs$contb_receipt_dt < as.Date("2016-12-01"), 
+                              time.categories[4], time.categories[5]))))
+
+contribs$time.category.num <- ifelse(
+  contribs$contb_receipt_dt < as.Date("2015-01-01"), 1, 
+         ifelse(contribs$contb_receipt_dt < as.Date("2016-02-01"), 2, 
+                ifelse(contribs$contb_receipt_dt < as.Date("2016-07-01"), 3,
+                       ifelse(contribs$contb_receipt_dt < as.Date("2016-12-01"), 
+                              4, 5))))
+
+contrib.amts <- contribs %>% 
+  select(cand_nm, time.category, time.category.num, contb_receipt_amt, latitude,
+         longitude, city) %>% 
+  group_by(cand_nm, time.category, latitude, longitude) %>% 
+  mutate(total.amount = sum(contb_receipt_amt, na.rm = T)) %>% 
+  filter(total.amount > 0)
+
+contrib.amts <- contrib.amts[!duplicated(contrib.amts[, c(1, 2, 6)]), ]
+
+max.amt = c()
+for (i in 1:5){
+  max.amt <- c(max.amt,
+               max(subset(contrib.amts, time.category.num == i)$total.amount))
+}
+
+contrib.amts$alpha <-
+  contrib.amts$total.amount / max.amt[contrib.amts$time.category.num]
+```
+
+```{r, message = FALSE, warning = FALSE}
+# For the following separate plots were created instead of using facet grid with the time
+#  category in the formula) because such would necessitate zooming in unless a large
+#  screen is used and such did not seem optimal
+for (i in 1:5){
+  curr.subset <- subset(contribs, time.category.num == i)
+  print(ggmap(get_map(location = "california",
+                      zoom = 6, maptype = "toner-lite")) + 
+          geom_density2d(data = curr.subset,
+                         aes(x = longitude, y = latitude), size = 0.3) + 
+          stat_density2d(data = curr.subset, 
+                         aes(x = longitude, y = latitude, fill = ..level.., 
+                             alpha = ..level..), size = 0.01, 
+                         bins = 16, geom = "polygon") + 
+          scale_fill_gradient(low = "yellow", high = "red") + 
+          scale_alpha(range = c(0, 0.3), guide = FALSE) +
+          scale_color_discrete("") + theme_nothing(legend = TRUE) +
+          labs(title = paste0("Frequency of Contributions (",
+                              time.categories[i], ")"), fill = "Proportion"))
+}
+```
+
+The activity of contribution amounts does show slightly significant changes in space over time. The areas immediately surrounding the metropolitan areas of the SF Bay Area, Sacremento, Los Angeles, and San Diego are always far more active than other parts of the state. As seen before, contributions are associated with other parts of the state but these are relatively trivial in quantity. 
+
+We see that when the primary season began, the number of financial contributions increased significantly, as is evidenced by the numeric values on the legend of fill gradient colors. During the primary season and up until the conclusion of the general election, not much change is apparent except the areas associated with contribution receipts become more slightly more concentrated around major metropolitan areas. 
+
+There are apparent changes in activity over time, though. If anything there appears a slight decrease in contributions over time, as perhaps supporters are fatiguing.
+
+It might be interesting to see how support for each candidate changed over time, but the number of contributions herein doesn't seem like a suitable proxy for that. It seems many contributions are made for purposes other than the respective 2016 campaigns.
+
+
+# Final Plots and Summary
+
+In conducting this investigation, I was particularly fond of the below plots
+
+This first plot shows us the proportion of contributions received by Clinton and Sanders that were of particular financial amounts.
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(data = subset(all.contribs, cand_nm %in% c("Clinton, Hillary Rodham",
+                                                  "Sanders, Bernard")),
+       aes(x = contb_receipt_amt, y = ..density.. , color = cand_nm)) +
+  geom_freqpoly(binwidth = 100) + xlim(0, 3000) +
+  ggtitle(
+    "Proportion of Contribution Amounts to Clinton and Sanders (Nationwide)"
+    ) +
+  ylab("Proportion") + xlab("Contribution Amount") +
+  scale_color_manual(guide = guide_legend(title = ""),
+                     values = c("orange1", "slateblue"))
+```
+
+Multiple interpretations can be made from the above. On the one hand, it seems quite apparent that a greater portion of contributions to Sanders were of smaller quantities. However, one may also argue that the difference doesn't appear to be as significant as it is often painted to be in the media. In that sense, this plot inspires curiosity.
+
+This next plot also inspires curiosity and brings into question the integrity of at least some contributions.
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(data = subset(contribs, contbr_nm == "PENDERGAST, JAN"), 
+       aes(x = contb_receipt_dt_ym,
+           y = contb_receipt_amt)) +
+  geom_bar(stat = "identity") + xlab("Date") +
+  ylab("Contribution Amount (USD)") +
+  ggtitle("Contribution Amounts (USD) By Jan Pendergast")
+```
+
+We see contributions (in this case, exclusively for Ted Cruz) made by one individual - Jan Pendergast. It seems that many contributions come in pairs, with one being for a positive amount and the other being for the negative of that amount. Further, these contributions have receipts dated all the way into the distant future and even on those dates, seem to occur with significant frequency. Such may not be definitely indicative of wrongdoing but does, at the least, arouse curiosity.
+
+In the following, we are able to see frequency across time and space. Above, we used five individual plots instead of faceting. Here we use faciting so that we're looking at just one plot. We'll start by subsetting the data so we only get plots of contributions before the primary season, at the end of the election season, and after the election season so that we only view a fraction of the above graphs.
+
+```{r, message = FALSE, warning = FALSE}
+contribs.date.subset <-
+  contribs[contribs$time.category %in% c("Before 2015",
+                                         "7/2016 - 12/2016",
+                                         "12/2016 And Beyond"),]
+ggmap(get_map(location = "california",
+              zoom = 6, maptype = "toner-lite")) + 
+  geom_density2d(data = contribs.date.subset, aes(x = longitude, y = latitude),
+                 size = 0.3) + 
+  stat_density2d(data = contribs.date.subset, 
+                 aes(x = longitude, y = latitude, fill = ..level.., 
+                     alpha = ..level..), size = 0.01, 
+                 bins = 16, geom = "polygon") + 
+  scale_fill_gradient(low = "yellow", high = "red") + 
+  scale_alpha(range = c(0, 0.3), guide = FALSE) +
+  scale_color_discrete("") + theme_nothing(legend = TRUE) +
+  facet_wrap(~ time.category) +
+  labs(fill = "Proportion")
+```
+
+On the one hand, this visualization is satisfying to some extent because it seems to cover so many dimensions in such a way that one may comprehend the visualization quite rapidly yet still learn quite a bit. We see that although contributions are associated with disparate other parts of the state, such a significant number are associated with Sacramento, the SF Bay Area, Los Angeles, and San Diego that these other contributions are almost trivial.
+
+Also significant is the impression that this activity has not changed after the election, which some characterize as a shocking and a game-changer of sorts. However, this data may not completely forecast future events. Only time will tell.
+
+
+# Reflection
+
+The first detail I'd like to discuss is the flexibility of ggmap. As I experimented with ggmap, I found that quite a number of locations could be specified - and specification was not strict, much like when using the Google Maps API geocoding feature. This should not come as a surprise since one of the used sources of maps is Google Maps. Maps can also be taken from other sources such as Open Street Maps, and formatted in different appearances, such as that of satellite imagery. The appearance of points with specified alpha levels, contour lines, and density representations was quite pleasing.
+
+However, there were downsides such as lack of flexibility regarding plot formatting. The easiest way to remove such features as x and y-axis labels (in this case, "lat" and "lon") and tick labels also removes user-specified later additions, and it is not trivial to completely customize the plot additions to one's liking.
+
+One challenge that repeatedly came up was that of data limitations. On the one hand, I recognize that this data is "clean" and thus easier to work with, such that, for instance, there are only an insignificant number of blatantly incorrect states. However, it seemed suboptimal to have a significant number of contributions with receipts dated in the future or from several years prior, yet labelled as being for the 2016 primary elections or general elections. Clearly, such could not have been known before one's announcement of candidacy and, for all one knows, the relevant candidate may be ineligible for presidential office in the future (e.g., the candidate may serve two terms as president by the date of the donation receipt).
+
+Further, I often encountered situations in which I desired further data. Fortunately, the quantity of records in the present data was not lacking. However, from time to time I desired further features, such as unique identification of supporters and indicators of supporter enthusiasm. To be fair, I realize I was still quite fortunate in having access to the extent of the present data.
+
+If such data as was desired is collected in the future, such could provide grounds for future exploration. For instance, one could more reliably investigate integrity of contributions. Further, some fields, such as "memo_text" were not presently investigated because of the relative of non-empty such fields and the field "form_tp" was not presently investigated because there existed such a significant number of contributions that likely were not made for the claimed purpose and this cast doubt on the integrity of claims regarding the purpose of othercontributions. If more information regarding these features is amassed, better investigation of these could be made (e.g., one may check which "memo_text" subjects are most common and how subjects correlate with time and space - i.e., one's locale).
