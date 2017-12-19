@@ -13,5 +13,5 @@ This repository contains an exploration of financial contributions in California
 * RColorBrewer
 
 Included in this repository are:
-* .rmd file of the exploration itself
-* .html file (knitted from the rmd file contents)
+* pcampaigns2016.rmd - details of the exploration itself
+* pcampaigns2016.html - knitted from the rmd file contents
